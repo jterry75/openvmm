@@ -1,0 +1,744 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+// VM configuration types for OpenVMM.
+//
+// This proto models the internal device and resource hierarchy so that a
+// single definition maps directly to the internal config model with minimal
+// translation.
+//
+// Leaf types such as `DiskConfig` and `NetworkBackend` are defined once and
+// reused wherever they appear in the device tree (e.g. a VirtIO block device,
+// an NVMe namespace, or a SCSI LUN all reference the same `DiskConfig`).
+
+syntax = "proto3";
+
+package vmservice;
+option go_package = "vmservice";
+
+// ============================================================================
+// Top-level VM configuration
+// ============================================================================
+
+// Complete configuration for a virtual machine.
+message VMConfig {
+    // Processor configuration.
+    ProcessorConfig processor = 1;
+
+    // Memory configuration.
+    MemoryConfig memory = 2;
+
+    // Optional NUMA topology. When omitted, the VM has a single NUMA node
+    // containing all processors and memory. When set, the per-node resource
+    // totals must equal the top-level processor.count and memory.size_mb.
+    NumaTopology numa_topology = 3;
+
+    // Device configuration.
+    DevicesConfig devices = 4;
+
+    // Boot configuration.
+    BootConfig boot = 5;
+}
+
+// ============================================================================
+// Processor configuration
+// ============================================================================
+
+// Processor (vCPU) configuration for the VM.
+message ProcessorConfig {
+    // Total number of virtual processors.
+    uint32 count = 1;
+
+    // Number of processors per socket. Determines the socket count visible
+    // to the guest via CPUID (socket_count = count / cores_per_socket).
+    // If unset, all processors are in a single socket.
+    uint32 cores_per_socket = 2;
+
+    // Enable symmetric multi-threading (hyperthreading). When true, each
+    // core exposes two threads.
+    bool enable_smt = 3;
+}
+
+// ============================================================================
+// Memory configuration
+// ============================================================================
+
+// Memory configuration for the VM.
+message MemoryConfig {
+    // Total guest RAM in megabytes.
+    uint64 size_mb = 1;
+}
+
+// ============================================================================
+// NUMA topology
+// ============================================================================
+
+// Optional NUMA topology definition. Partitions processors and memory across
+// virtual NUMA nodes. The guest learns about this topology via ACPI SRAT.
+//
+// When present:
+// - Sum of all node processor_count values must equal ProcessorConfig.count.
+// - Sum of all node memory_mb values must equal MemoryConfig.size_mb.
+//
+// The node ID (map key) is used to correlate device affinity — e.g.
+// PciBus.numa_node and MmioBus.numa_node reference these IDs.
+message NumaTopology {
+    // NUMA nodes, keyed by node ID (uint32).
+    // Node IDs map to ACPI SRAT proximity domains.
+    map<uint32, NumaNode> nodes = 1;
+}
+
+// A virtual NUMA node.
+message NumaNode {
+    // --- Guest-visible topology ---
+
+    // Number of processors assigned to this node.
+    uint32 processor_count = 1;
+
+    // Memory assigned to this node, in megabytes.
+    uint64 memory_mb = 2;
+
+    // --- Host affinity (optional) ---
+
+    // When set, the VMM allocates host resources from the specified physical
+    // NUMA node and pins VPs to the specified host logical processors.
+    // When unset, the VMM picks host resources automatically.
+    HostAffinity host_affinity = 3;
+}
+
+// Host resource affinity for a virtual NUMA node.
+// Controls which physical resources back the virtual node.
+message HostAffinity {
+    // Physical NUMA node ID on the host to allocate memory from.
+    uint32 physical_numa_node = 1;
+
+    // Host logical processor IDs to pin this node's VPs to.
+    // Length must equal the parent NumaNode's processor_count.
+    repeated uint32 host_processors = 2;
+}
+
+// ============================================================================
+// Boot configuration
+// ============================================================================
+
+// How the VM boots.
+message BootConfig {
+    oneof boot {
+        DirectBoot direct_boot = 1;
+        UefiBoot uefi = 2;
+        PcatBoot pcat = 3;
+    }
+}
+
+// Linux direct boot (kernel + optional initrd).
+message DirectBoot {
+    // Path to the kernel image on the host.
+    string kernel_path = 1;
+
+    // Path to the initrd/initramfs on the host.
+    string initrd_path = 2;
+
+    // Kernel command line.
+    string kernel_cmdline = 3;
+
+    // Enable serial console (COM ports).
+    bool enable_serial = 4;
+
+    // How firmware tables are presented to the guest.
+    // On x86, ACPI is always used. On aarch64, this selects between a full
+    // device tree or an ACPI boot path.
+    LinuxBootMode boot_mode = 5;
+}
+
+// Firmware table presentation mode for Linux direct boot.
+enum LinuxBootMode {
+    // ACPI tables for device discovery (default, works on x86 and aarch64).
+    LINUX_BOOT_MODE_ACPI = 0;
+
+    // Full device tree (aarch64 only).
+    LINUX_BOOT_MODE_DEVICE_TREE = 1;
+}
+
+// UEFI boot.
+message UefiBoot {
+    // Path to the UEFI firmware image on the host.
+    string firmware_path = 1;
+
+    // Optional EFI boot device path.
+    string device_path = 2;
+
+    // Optional data for the UEFI boot (e.g. kernel cmdline for Linux).
+    string optional_data = 3;
+
+    // Enable Secure Boot.
+    bool secure_boot = 4;
+
+    // Enable serial console redirection.
+    bool enable_serial = 5;
+
+    // Enable virtual TPM (Trusted Platform Module).
+    bool enable_tpm = 6;
+
+    // Console output destination.
+    UefiConsoleMode console_mode = 7;
+}
+
+// UEFI console output mode.
+enum UefiConsoleMode {
+    // Default EFI console output.
+    UEFI_CONSOLE_MODE_DEFAULT = 0;
+
+    // Redirect console output to COM1.
+    UEFI_CONSOLE_MODE_COM1 = 1;
+
+    // Redirect console output to COM2.
+    UEFI_CONSOLE_MODE_COM2 = 2;
+
+    // No console output.
+    UEFI_CONSOLE_MODE_NONE = 3;
+}
+
+// Legacy BIOS (PCAT) boot.
+message PcatBoot {
+    // Path to the BIOS firmware ROM on the host.
+    string firmware_path = 1;
+
+    // Boot device priority order (up to 4 entries).
+    // If empty, a default order of optical, hard drive, network, floppy is used.
+    repeated PcatBootDevice boot_order = 2;
+}
+
+// PCAT boot device types.
+enum PcatBootDevice {
+    PCAT_BOOT_DEVICE_FLOPPY = 0;
+    PCAT_BOOT_DEVICE_HARD_DRIVE = 1;
+    PCAT_BOOT_DEVICE_OPTICAL = 2;
+    PCAT_BOOT_DEVICE_NETWORK = 3;
+}
+
+// ============================================================================
+// Device configuration
+// ============================================================================
+
+// Complete device configuration for a virtual machine.
+message DevicesConfig {
+    // PCIe root complexes, keyed by friendly name (e.g. "pci0").
+    // The map key is the bus name — must be unique.
+    map<string, PciBus> pci_buses = 1;
+
+    // MMIO buses, keyed by friendly name (e.g. "mmio0").
+    map<string, MmioBus> mmio_buses = 2;
+
+    // VMBus (Hyper-V paravirtual) devices, keyed by instance ID (GUID string).
+    map<string, VmbusDevice> vmbus_devices = 3;
+
+    // Chipset-level devices (legacy IO ports, platform UARTs, etc.).
+    // These are attached directly to the chipset, not through a bus topology.
+    repeated ChipsetDevice chipset_devices = 4;
+}
+
+// ============================================================================
+// PCI bus topology
+// ============================================================================
+
+// A PCIe root complex with its port topology.
+// The bus name (map key in DevicesConfig.pci_buses) identifies this complex.
+message PciBus {
+    // PCI segment number.
+    uint32 segment = 1;
+
+    // Root ports exposed by this complex, keyed by friendly port name.
+    // The map key is a software label (e.g. "port0"), not the PCIe BDF —
+    // BDF assignment is managed internally by the VMM.
+    map<string, PciRootPort> root_ports = 2;
+
+    // Optional NUMA node affinity. Reported to the guest via ACPI proximity
+    // domain so the OS can prefer local memory/processors for device traffic.
+    optional uint32 numa_node = 3;
+}
+
+// A root port on a PCIe root complex.
+// The port name (map key in PciBus.root_ports) identifies this port.
+message PciRootPort {
+    // Whether this port supports hot-plug.
+    bool hotplug = 1;
+
+    // The device at this port. A PCIe root port is a point-to-point link,
+    // so at most one device can be attached. If unset, the port is empty
+    // (available for hot-plug if hotplug is true).
+    PciDevice device = 2;
+}
+
+// A PCI device function.
+message PciDevice {
+    // The concrete device behind this PCI function.
+    oneof device {
+        VirtioDevice virtio = 1;
+        NvmeDevice nvme = 2;
+    }
+}
+
+// ============================================================================
+// MMIO bus topology
+// ============================================================================
+
+// An MMIO bus for platforms that attach devices directly to memory-mapped I/O
+// regions rather than through a PCI root complex (e.g. virtio-mmio on aarch64).
+// The bus name (map key in DevicesConfig.mmio_buses) identifies this bus.
+message MmioBus {
+    // Devices attached to this MMIO bus, keyed by base address.
+    // The map key is the MMIO base address — must be unique within the bus.
+    map<uint64, MmioDevice> devices = 1;
+
+    // Optional NUMA node affinity.
+    optional uint32 numa_node = 2;
+}
+
+// A device attached to an MMIO bus.
+// The base address (map key in MmioBus.devices) identifies this slot.
+message MmioDevice {
+    // IRQ number assigned to this device.
+    uint32 irq = 1;
+
+    // The concrete device behind this MMIO slot.
+    oneof device {
+        VirtioDevice virtio = 2;
+        UartDevice uart = 3;
+    }
+}
+
+// ============================================================================
+// VMBus devices
+// ============================================================================
+
+// A device attached to the VMBus (Hyper-V synthetic / paravirtual bus).
+// VMBus devices are identified by instance ID (the map key in
+// DevicesConfig.vmbus_devices) and enumerated by the guest via the VMBus
+// protocol rather than PCI configuration space.
+message VmbusDevice {
+    // The concrete device behind this VMBus channel.
+    oneof device {
+        ScsiControllerDevice scsi_controller = 1;
+        SynthNetDevice synth_net = 2;
+    }
+}
+
+// ============================================================================
+// SCSI controller (StorVSP / SynthStor)
+// ============================================================================
+
+// A synthetic SCSI controller (StorVSP) exposed over VMBus.
+// Maps to the internal ScsiControllerHandle.
+message ScsiControllerDevice {
+    // Maximum I/O queue depth per channel.
+    uint32 io_queue_depth = 1;
+
+    // Maximum number of sub-channels (total channels = 1 + max_sub_channel_count).
+    uint32 max_sub_channel_count = 2;
+
+    // Attached SCSI disks, keyed by LUN number.
+    // The map key is the logical unit number — must be unique within the controller.
+    map<uint32, ScsiDisk> disks = 3;
+}
+
+// A SCSI disk (logical unit) attached to a StorVSP controller.
+// The LUN (map key in ScsiControllerDevice.disks) identifies this disk.
+message ScsiDisk {
+    // Present the disk as read-only to the guest.
+    bool read_only = 1;
+
+    // Backing disk configuration (same DiskConfig used by VirtIO/NVMe).
+    DiskConfig disk = 2;
+}
+
+// ============================================================================
+// Synthetic NIC (NetVSP)
+// ============================================================================
+
+// A synthetic network adapter (NetVSP) exposed over VMBus.
+// Maps to the internal NetvspHandle.
+message SynthNetDevice {
+    // MAC address in colon-separated format (e.g. "12:34:56:78:9a:bc").
+    string mac_address = 1;
+
+    // Maximum number of queues (RSS channels).
+    uint32 max_queues = 2;
+
+    // Network backend (same NetworkBackend used by VirtIO net).
+    NetworkBackend backend = 3;
+}
+
+// ============================================================================
+// Chipset (ISA) devices
+// ============================================================================
+
+// A device on the chipset / ISA bus, addressed by IO port.
+message ChipsetDevice {
+    oneof device {
+        IsaSerialDevice isa_serial = 1;
+    }
+}
+
+// A 16550A UART at a standard PC COM port (ISA IO-port addressed).
+// The COM port enum implies the IO base address and IRQ.
+message IsaSerialDevice {
+    // Which COM port (determines IO port base and IRQ).
+    ComPort com_port = 1;
+
+    // Serial backend.
+    SerialBackend backend = 2;
+}
+
+// Standard PC COM port identifiers.
+enum ComPort {
+    COM_PORT_UNSPECIFIED = 0;
+    COM_PORT_COM1 = 1;  // IO 0x3F8, IRQ 4
+    COM_PORT_COM2 = 2;  // IO 0x2F8, IRQ 3
+    COM_PORT_COM3 = 3;  // IO 0x3E8, IRQ 4
+    COM_PORT_COM4 = 4;  // IO 0x2E8, IRQ 3
+}
+
+// ============================================================================
+// UART device (bus-agnostic)
+// ============================================================================
+
+// A UART device. When placed on an MMIO bus, the base address and IRQ come
+// from the MmioDevice; when placed on the chipset/ISA bus, they come from
+// the COM port enum. The UART itself just carries the backend.
+message UartDevice {
+    // Serial backend (same SerialBackend used by ISA serial, VirtIO console, etc.).
+    SerialBackend backend = 1;
+}
+
+// ============================================================================
+// VirtIO devices
+// ============================================================================
+
+// A VirtIO device. Transport-agnostic — the same definition is used whether
+// the device is attached via PCI (virtio-pci) or MMIO (virtio-mmio).
+message VirtioDevice {
+    oneof device {
+        VirtioBlkDevice blk = 1;
+        VirtioNetDevice net = 2;
+        VirtioFsDevice fs = 3;
+        VirtioPmemDevice pmem = 4;
+        VirtioConsoleDevice console = 5;
+        VirtioVsockDevice vsock = 6;
+    }
+}
+
+// virtio-blk: a block device exposed through VirtIO.
+message VirtioBlkDevice {
+    // Backing disk configuration.
+    DiskConfig disk = 1;
+
+    // Present the disk as read-only to the guest.
+    bool read_only = 2;
+}
+
+// virtio-net: a network device exposed through VirtIO.
+message VirtioNetDevice {
+    // MAC address in colon-separated format (e.g. "12:34:56:78:9a:bc").
+    string mac_address = 1;
+
+    // Maximum number of virtqueues (multi-queue support).
+    uint32 max_queues = 2;
+
+    // Network backend.
+    NetworkBackend backend = 3;
+}
+
+// virtio-fs: a shared filesystem exposed through VirtIO.
+message VirtioFsDevice {
+    // Mount tag visible inside the guest.
+    string tag = 1;
+
+    // Filesystem backend.
+    oneof backend {
+        HostFsBackend host_fs = 2;
+        SectionFsBackend section_fs = 3;
+    }
+}
+
+message HostFsBackend {
+    // Path on the host to share.
+    string root_path = 1;
+
+    // Additional mount options.
+    string mount_options = 2;
+}
+
+message SectionFsBackend {
+    // Path on the host to the section-backed filesystem root.
+    string root_path = 1;
+}
+
+// virtio-pmem: persistent memory exposed through VirtIO.
+message VirtioPmemDevice {
+    // Path to the backing file on the host.
+    string path = 1;
+}
+
+// virtio-console: a serial console exposed through VirtIO.
+message VirtioConsoleDevice {
+    // Serial backend (same SerialBackend used by chipset serial ports).
+    SerialBackend backend = 1;
+}
+
+// virtio-vsock: a VM sockets device exposed through VirtIO.
+message VirtioVsockDevice {
+    // Guest CID (Context Identifier).
+    uint64 guest_cid = 1;
+}
+
+// ============================================================================
+// NVMe devices
+// ============================================================================
+
+// An NVMe controller presented as a PCI device.
+message NvmeDevice {
+    // Number of MSI-X interrupts to support.
+    uint32 msix_count = 1;
+
+    // Maximum number of I/O queues.
+    uint32 max_io_queues = 2;
+
+    // Initial set of namespaces, keyed by NSID.
+    // The map key is the namespace ID — must be unique within the controller.
+    map<uint32, NvmeNamespace> namespaces = 3;
+}
+
+// An NVMe namespace within a controller.
+// The NSID (map key in NvmeDevice.namespaces) identifies this namespace.
+message NvmeNamespace {
+    // Present the namespace as read-only to the guest.
+    bool read_only = 1;
+
+    // Backing disk configuration.
+    DiskConfig disk = 2;
+}
+
+// ============================================================================
+// Shared / reusable leaf types
+// ============================================================================
+
+// Disk configuration — reusable across any storage attachment point
+// (VirtIO block, NVMe namespace, SCSI LUN, IDE channel, ...).
+message DiskConfig {
+    // Path to the disk image or device on the host.
+    string host_path = 1;
+
+    // Disk image format.
+    DiskFormat format = 2;
+}
+
+// Disk image format.
+enum DiskFormat {
+    // Raw / flat file.
+    DISK_FORMAT_RAW = 0;
+
+    // VHD (legacy, fixed).
+    DISK_FORMAT_VHD1 = 1;
+
+    // VHDX.
+    DISK_FORMAT_VHDX = 2;
+
+    // Host block device (Linux).
+    DISK_FORMAT_BLOCK_DEVICE = 3;
+}
+
+// Network backend configuration — reusable across any NIC attachment point
+// (VirtIO net, VMBus NIC, ...).
+message NetworkBackend {
+    oneof backend {
+        NullNetBackend null = 1;
+        ConsommeNetBackend consomme = 2;
+        TapNetBackend tap = 3;
+        DioNetBackend dio = 4;
+    }
+}
+
+// Null backend: drops all packets, never receives.
+message NullNetBackend {}
+
+// Consomme (user-mode NAT) backend.
+message ConsommeNetBackend {
+    // CIDR of the virtual network (e.g. "192.168.0.0/24").
+    string cidr = 1;
+
+    // Host-to-guest port forwarding rules.
+    repeated PortForwardRule port_forwards = 2;
+}
+
+message PortForwardRule {
+    PortProtocol protocol = 1;
+    string host_address = 2;
+    uint32 host_port = 3;
+    uint32 guest_port = 4;
+}
+
+enum PortProtocol {
+    PORT_PROTOCOL_TCP = 0;
+    PORT_PROTOCOL_UDP = 1;
+}
+
+// TAP backend (Linux).
+message TapNetBackend {
+    // TAP device name.
+    string name = 1;
+}
+
+// DirectIO backend (Windows Hyper-V vmswitch).
+message DioNetBackend {
+    string switch_id = 1;   // GUID
+    string port_id = 2;     // GUID
+}
+
+// Serial backend configuration — reusable across any serial device
+// (VirtIO console, 16550 UART, PL011, VMBus serial, ...).
+message SerialBackend {
+    oneof backend {
+        SocketSerialBackend socket = 1;
+        DisconnectedSerialBackend disconnected = 2;
+    }
+}
+
+// Unix domain socket or TCP socket backend.
+message SocketSerialBackend {
+    // Path to a Unix socket, or a TCP address (e.g. "127.0.0.1:9001").
+    string path = 1;
+}
+
+// Disconnected backend: discards output, never produces input.
+message DisconnectedSerialBackend {}
+
+// ============================================================================
+// Device modify (hot-plug / hot-remove)
+// ============================================================================
+
+// Request to add, remove, or update a device at runtime.
+//
+// Type safety is enforced by structure: each slot type carries its own
+// addressing AND only the device types valid for that bus. You cannot
+// accidentally put a SCSI disk in a PCI slot — the proto won't allow it.
+message ModifyDeviceRequest {
+    ModifyType type = 1;
+
+    // The slot identifies WHERE on the bus hierarchy to operate, and for
+    // ADD/UPDATE, carries the device payload.
+    oneof slot {
+        PciSlot pci = 2;
+        MmioSlot mmio = 3;
+        VmbusSlot vmbus = 4;
+        ScsiDiskSlot scsi_disk = 5;
+        NvmeNamespaceSlot nvme_namespace = 6;
+        ChipsetSlot chipset = 7;
+    }
+}
+
+enum ModifyType {
+    MODIFY_TYPE_ADD = 0;
+    MODIFY_TYPE_REMOVE = 1;
+    MODIFY_TYPE_UPDATE = 2;
+}
+
+// --- PCI slot ---------------------------------------------------------------
+// Addresses a root port on a PCI bus. Valid devices: VirtioDevice, NvmeDevice.
+message PciSlot {
+    // Which PCI bus (by name).
+    string bus_name = 1;
+
+    // Which root port on that bus.
+    string port_name = 2;
+
+    // The device to place. Required for ADD/UPDATE, ignored for REMOVE.
+    oneof device {
+        VirtioDevice virtio = 3;
+        NvmeDevice nvme = 4;
+    }
+}
+
+// --- MMIO slot --------------------------------------------------------------
+// Addresses a memory-mapped device slot. Valid devices: VirtioDevice, UartDevice.
+message MmioSlot {
+    // Which MMIO bus (by name).
+    string bus_name = 1;
+
+    // Base address of the MMIO region.
+    uint64 base_address = 2;
+
+    // IRQ number. Required for ADD, used with base_address to identify for REMOVE.
+    uint32 irq = 3;
+
+    // The device to place. Required for ADD/UPDATE, ignored for REMOVE.
+    oneof device {
+        VirtioDevice virtio = 4;
+        UartDevice uart = 5;
+    }
+}
+
+// --- VMBus slot -------------------------------------------------------------
+// Addresses a VMBus channel by instance ID. Valid devices: ScsiControllerDevice,
+// SynthNetDevice.
+message VmbusSlot {
+    // VMBus instance ID (GUID string).
+    string instance_id = 1;
+
+    // The device to place. Required for ADD/UPDATE, ignored for REMOVE.
+    oneof device {
+        ScsiControllerDevice scsi_controller = 2;
+        SynthNetDevice synth_net = 3;
+    }
+}
+
+// --- SCSI disk slot ---------------------------------------------------------
+// Addresses a LUN within an existing SCSI controller (identified by its
+// VMBus instance ID). This is a sub-device slot — the controller must
+// already exist.
+message ScsiDiskSlot {
+    // Instance ID of the parent SCSI controller.
+    string controller_instance_id = 1;
+
+    // LUN number.
+    uint32 lun = 2;
+
+    // The disk to place at this LUN. Required for ADD/UPDATE, ignored for REMOVE.
+    ScsiDisk device = 3;
+}
+
+// --- NVMe namespace slot ----------------------------------------------------
+// Addresses a namespace within an existing NVMe controller (identified by
+// PCI bus + port). This is a sub-device slot — the controller must
+// already exist.
+message NvmeNamespaceSlot {
+    // PCI bus name of the parent NVMe controller.
+    string bus_name = 1;
+
+    // PCI port name of the parent NVMe controller.
+    string port_name = 2;
+
+    // Namespace ID.
+    uint32 nsid = 3;
+
+    // The namespace to place. Required for ADD/UPDATE, ignored for REMOVE.
+    NvmeNamespaceDevice device = 4;
+}
+
+// NVMe namespace payload (without NSID — addressing lives on NvmeNamespaceSlot).
+message NvmeNamespaceDevice {
+    bool read_only = 1;
+    DiskConfig disk = 2;
+}
+
+// --- Chipset slot -----------------------------------------------------------
+// Addresses a chipset device by its natural key (e.g. COM port).
+message ChipsetSlot {
+    oneof slot {
+        ComPort com_port = 1;
+    }
+
+    // The device to place. Required for ADD/UPDATE, ignored for REMOVE.
+    oneof device {
+        IsaSerialDevice isa_serial = 2;
+    }
+}
